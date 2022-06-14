@@ -1,0 +1,130 @@
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: docker-dev-certificate
+  # 注意最好设置为 istio-system，因为 istiod 默认会在这找证书
+  namespace: istio-system
+spec:
+  isCA: false
+  duration: 87600h # 10 years
+  secretName: docker.dev.cn
+  commonName: docker.dev.cn
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  subject:
+    organizations:
+      - cluster.local
+      - cert-manager
+  dnsNames:
+    - docker.dev.cn
+  issuerRef:
+    name: istio-ca
+    kind: Issuer
+    group: cert-manager.io
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: docker-plugin-demo-svc
+  namespace: dev
+  labels:
+    app: docker-plugin-demo
+    service: docker-plugin-demo
+spec:
+  ports:
+    - port: 8080
+      name: http
+  selector:
+    app: docker-plugin-demo
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: docker-plugin-demo-sa
+  namespace: dev
+  labels:
+    account: docker-plugin-demo
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: docker-plugin-demo-deploy-v1
+  namespace: dev
+  labels:
+    app: docker-plugin-demo
+    version: v1
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: docker-plugin-demo
+      version: v1
+  template:
+    metadata:
+      namespace: dev
+      labels:
+        app: docker-plugin-demo
+        version: v1
+    spec:
+      serviceAccountName: docker-plugin-demo-sa
+      containers:
+        - name: docker-plugin-demo
+          # 需要先将本地的镜像推送到镜像仓库
+          # 每次构建镜像都打上latest标签，譬如当前最近这次构建的镜像是v1.0：docker tag oomgomgxx/docker-plugin-demo:v1.0 oomgomgxx/docker-plugin-demo:latest
+          # 一般标签latest会和imagePullPolicy=Always一起使用
+          # 正式环境应该尽量避免使用latest标签
+          image: docker.io/oomgomgxx/docker-plugin-demo:latest
+#          imagePullPolicy: Always
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8080
+          securityContext:
+            runAsUser: 1000
+---
+apiVersion: networking.istio.io/v1alpha3
+kind: Gateway
+metadata:
+  name: docker-plugin-demo-gw
+  namespace: dev
+spec:
+  selector:
+    istio: ingressgateway # use istio default controller
+  servers:
+    - port:
+        number: 80
+        name: http
+        protocol: HTTP
+        # 不进行转发，可以不是用https
+#      tls:
+#        httpsRedirect: true
+      hosts:
+        - docker.dev.cn
+    - port:
+        number: 443
+        name: https-443
+        protocol: HTTPS
+      hosts:
+        - docker.dev.cn
+      # 使用上面的证书
+      tls:
+        mode: SIMPLE
+        credentialName: docker.dev.cn
+---
+apiVersion: networking.istio.io/v1alpha3
+kind: VirtualService
+metadata:
+  name: docker-plugin-demo-vs
+  namespace: dev
+spec:
+  hosts:
+    - "docker.dev.cn"
+  gateways:
+    - docker-plugin-demo-gw
+  http:
+    - route:
+        - destination:
+            # svc 名称
+            host: docker-plugin-demo-svc
+            port:
+              number: 8080
